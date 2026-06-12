@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ArchitectAI — Describe it. Design it.</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">A</div>
+    <div class="brand-text">
+      <span class="brand-name">ArchitectAI</span>
+      <span class="brand-tag">MVP mockup — describe it, design it</span>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <span class="pill pill-demo">Simulated AI · no backend</span>
+    <button class="btn btn-ghost" id="btn-new">＋ New design</button>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ============ CHAT PANEL ============ -->
+  <section class="chat-panel">
+    <div class="chat-scroll" id="chat-scroll">
+      <div class="chat-empty" id="chat-empty">
+        <div class="chat-empty-icon">◈</div>
+        <h2>What are you building?</h2>
+        <p>Describe a system in plain language — greenfield or brownfield —
+           and get a structured solution design: diagram, design doc, and a
+           machine-readable spec.</p>
+        <div class="chips" id="starter-chips"></div>
+      </div>
+      <div id="chat-messages"></div>
+    </div>
+
+    <div class="chat-input-wrap">
+      <div class="chips chips-followup" id="followup-chips"></div>
+      <form class="chat-input" id="chat-form">
+        <textarea id="chat-text" rows="1"
+          placeholder="Describe your system, or refine the current design…"></textarea>
+        <button type="submit" class="btn btn-send" id="btn-send" title="Send">➤</button>
+      </form>
+      <div class="chat-hint">Mockup: responses are scripted to demonstrate the product concept.</div>
+    </div>
+  </section>
+
+  <!-- ============ WORKSPACE ============ -->
+  <section class="workspace">
+    <div class="ws-header">
+      <div class="ws-tabs" id="ws-tabs">
+        <button class="ws-tab active" data-tab="diagram">Diagram</button>
+        <button class="ws-tab" data-tab="doc">Design Doc</button>
+        <button class="ws-tab" data-tab="spec">Spec (JSON)</button>
+      </div>
+      <div class="ws-actions">
+        <div class="state-toggle" id="state-toggle" hidden>
+          <button class="state-btn" data-state="current">Current state</button>
+          <button class="state-btn active" data-state="target">Target state</button>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="btn-svg">Download SVG</button>
+        <button class="btn btn-ghost btn-sm" id="btn-json">Copy JSON</button>
+      </div>
+    </div>
+
+    <div class="ws-body">
+      <div class="ws-pane active" id="pane-diagram">
+        <div class="ws-placeholder" id="ws-placeholder">
+          <div class="ph-icon">▦</div>
+          <p>Your solution design will appear here.</p>
+          <p class="ph-sub">Start by describing a system in the chat.</p>
+        </div>
+        <div id="diagram-host"></div>
+      </div>
+      <div class="ws-pane" id="pane-doc">
+        <article class="doc" id="doc-host"></article>
+      </div>
+      <div class="ws-pane" id="pane-spec">
+        <pre class="spec" id="spec-host"></pre>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div class="toast" id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
