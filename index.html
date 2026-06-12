@@ -13,7 +13,7 @@
     <div class="brand-mark">A</div>
     <div class="brand-text">
       <span class="brand-name">ArchitectAI</span>
-      <span class="brand-tag">MVP mockup — describe it, design it</span>
+      <span class="brand-tag">MVP mockup — describe it · design it · build it</span>
     </div>
   </div>
   <div class="topbar-actions">
@@ -31,8 +31,9 @@
         <div class="chat-empty-icon">◈</div>
         <h2>What are you building?</h2>
         <p>Describe a system in plain language — greenfield or brownfield —
-           and get a structured solution design: diagram, design doc, and a
-           machine-readable spec.</p>
+           and get a structured solution design: diagram, design doc, and the
+           build pack (Terraform, CloudFormation, ADRs, backlog) to hand to
+           engineering.</p>
         <div class="chips" id="starter-chips"></div>
       </div>
       <div id="chat-messages"></div>
@@ -55,6 +56,7 @@
       <div class="ws-tabs" id="ws-tabs">
         <button class="ws-tab active" data-tab="diagram">Diagram</button>
         <button class="ws-tab" data-tab="doc">Design Doc</button>
+        <button class="ws-tab" data-tab="build">Build</button>
         <button class="ws-tab" data-tab="spec">Spec (JSON)</button>
       </div>
       <div class="ws-actions">
@@ -74,10 +76,47 @@
           <p>Your solution design will appear here.</p>
           <p class="ph-sub">Start by describing a system in the chat.</p>
         </div>
-        <div id="diagram-host"></div>
+        <div class="diagram-col">
+          <div id="diagram-host"></div>
+          <div class="diagram-hint" id="diagram-hint" hidden>
+            Click any component for its spec sheet, sizing, cost, and IaC snippet.
+          </div>
+        </div>
       </div>
+
+      <!-- node spec drawer -->
+      <aside class="drawer" id="drawer" hidden>
+        <div class="drawer-head">
+          <div>
+            <div class="drawer-badge" id="drawer-badge"></div>
+            <h3 id="drawer-title"></h3>
+            <div class="drawer-sub" id="drawer-sub"></div>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="drawer-close">✕</button>
+        </div>
+        <div class="drawer-body" id="drawer-body"></div>
+      </aside>
+
       <div class="ws-pane" id="pane-doc">
         <article class="doc" id="doc-host"></article>
+      </div>
+
+      <div class="ws-pane" id="pane-build">
+        <div class="build-toolbar">
+          <div class="artifact-tabs" id="artifact-tabs">
+            <button class="artifact-tab active" data-artifact="terraform">Terraform</button>
+            <button class="artifact-tab" data-artifact="cloudformation">CloudFormation</button>
+            <button class="artifact-tab" data-artifact="adr">ADRs</button>
+            <button class="artifact-tab" data-artifact="backlog">Backlog</button>
+          </div>
+          <div class="build-actions">
+            <button class="btn btn-ghost btn-sm" id="btn-copy-artifact">Copy</button>
+            <button class="btn btn-sm btn-primary" id="btn-dl-artifact">Download</button>
+          </div>
+        </div>
+        <div class="build-note" id="build-note"></div>
+        <pre class="codeblock" id="build-host"></pre>
+        <div id="backlog-host" class="backlog" hidden></div>
       </div>
       <div class="ws-pane" id="pane-spec">
         <pre class="spec" id="spec-host"></pre>

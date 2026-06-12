@@ -37,6 +37,765 @@ const KIND_COLORS = {
 };
 
 /* =====================================================================
+   SERVICE CATALOG  ("build it" layer)
+   ---------------------------------------------------------------------
+   Per-component spec sheets + IaC snippets. In the real product this is
+   a curated catalog the LLM selects from and parameterises — which is
+   exactly why generated Terraform can be trusted: the AI picks and
+   wires vetted building blocks, it doesn't freestyle HCL.
+   ===================================================================== */
+
+const CATALOG = {
+  pg: {
+    desc: "Primary relational store. Single writer, optional read replicas; per-service schemas keep future decomposition cheap.",
+    specs: { "Engine": "PostgreSQL 16 · RDS", "Sizing": "db.r6g.large · 2 vCPU / 16 GiB · gp3 200 GiB", "HA": "Multi-AZ, automated failover", "Backups": "PITR, 7-day window + weekly snapshot to vault", "Security": "Private subnets only · TLS enforced · IAM auth · KMS at rest" },
+    cost: 310,
+    tf: `resource "aws_db_instance" "main" {
+  identifier              = "\${local.name_prefix}-pg"
+  engine                  = "postgres"
+  engine_version          = "16.4"
+  instance_class          = "db.r6g.large"
+  allocated_storage       = 200
+  storage_type            = "gp3"
+  multi_az                = true
+  db_subnet_group_name    = aws_db_subnet_group.private.name
+  vpc_security_group_ids  = [aws_security_group.db.id]
+  storage_encrypted       = true
+  kms_key_id              = aws_kms_key.data.arn
+  backup_retention_period = 7
+  deletion_protection     = true
+  tags                    = local.tags
+}`,
+    cfn: `  Database:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: postgres
+      EngineVersion: "16.4"
+      DBInstanceClass: db.r6g.large
+      AllocatedStorage: "200"
+      MultiAZ: true
+      StorageEncrypted: true
+      BackupRetentionPeriod: 7
+      DeletionProtection: true`,
+  },
+  redis: {
+    desc: "Look-aside cache for hot reads and session state. Treat as ephemeral: the app must function (slower) with a cold cache.",
+    specs: { "Engine": "Redis 7 · ElastiCache", "Sizing": "cache.r7g.large × 2 (primary + replica)", "HA": "Automatic failover, multi-AZ", "Eviction": "allkeys-lru · TTL-first design", "Security": "In-transit TLS · AUTH token · private subnets" },
+    cost: 240,
+    tf: `resource "aws_elasticache_replication_group" "cache" {
+  replication_group_id       = "\${local.name_prefix}-cache"
+  description                = "App look-aside cache"
+  engine                     = "redis"
+  engine_version             = "7.1"
+  node_type                  = "cache.r7g.large"
+  num_cache_clusters         = 2
+  automatic_failover_enabled = true
+  multi_az_enabled           = true
+  at_rest_encryption_enabled = true
+  transit_encryption_enabled = true
+  subnet_group_name          = aws_elasticache_subnet_group.private.name
+  tags                       = local.tags
+}`,
+    cfn: `  Cache:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupDescription: App look-aside cache
+      Engine: redis
+      CacheNodeType: cache.r7g.large
+      NumCacheClusters: 2
+      AutomaticFailoverEnabled: true
+      MultiAZEnabled: true
+      TransitEncryptionEnabled: true`,
+  },
+  s3: {
+    desc: "Object storage for assets, exports, and document uploads. Versioned, lifecycle-tiered to cut cost on cold objects.",
+    specs: { "Service": "S3 · one bucket per concern", "Lifecycle": "IA after 30 d · Glacier after 180 d", "Security": "Block public access · SSE-KMS · access via presigned URLs", "DR": "Versioning on; optional cross-region replication" },
+    cost: 25,
+    tf: `resource "aws_s3_bucket" "assets" {
+  bucket = "\${local.name_prefix}-assets"
+  tags   = local.tags
+}
+
+resource "aws_s3_bucket_versioning" "assets" {
+  bucket = aws_s3_bucket.assets.id
+  versioning_configuration { status = "Enabled" }
+}
+
+resource "aws_s3_bucket_public_access_block" "assets" {
+  bucket                  = aws_s3_bucket.assets.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}`,
+    cfn: `  AssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration: { Status: Enabled }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true`,
+  },
+  queue: {
+    desc: "Async backbone: domain events fan out to consumers; side effects leave the request path. DLQs are non-negotiable.",
+    specs: { "Service": "SQS + EventBridge bus", "Delivery": "At-least-once · consumers must be idempotent", "DLQ": "After 5 receives · alarmed at depth > 0", "Security": "SSE · per-service IAM publish/consume policies" },
+    cost: 15,
+    tf: `resource "aws_sqs_queue" "events_dlq" {
+  name = "\${local.name_prefix}-events-dlq"
+  tags = local.tags
+}
+
+resource "aws_sqs_queue" "events" {
+  name                       = "\${local.name_prefix}-events"
+  visibility_timeout_seconds = 60
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.events_dlq.arn
+    maxReceiveCount     = 5
+  })
+  tags = local.tags
+}`,
+    cfn: `  EventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EventsDLQ.Arn
+        maxReceiveCount: 5
+  EventsDLQ:
+    Type: AWS::SQS::Queue`,
+  },
+  api: {
+    desc: "The modular monolith: one deployable, strictly bounded internal modules. Stateless — all state lives in the data tier.",
+    specs: { "Runtime": "Node 22 / TypeScript · ECS Fargate", "Sizing": "2 vCPU / 4 GiB × 2 tasks (autoscale to 10 on CPU > 60%)", "Deploys": "Blue/green via CodeDeploy · health-gated", "Security": "Task-role IAM · secrets from Secrets Manager · no public IP" },
+    cost: 175,
+    tf: `resource "aws_ecs_service" "api" {
+  name            = "\${local.name_prefix}-api"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.api.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets         = local.private_subnets
+    security_groups = [aws_security_group.api.id]
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.api.arn
+    container_name   = "api"
+    container_port   = 3000
+  }
+}
+
+resource "aws_appautoscaling_target" "api" {
+  max_capacity       = 10
+  min_capacity       = 2
+  resource_id        = "service/\${aws_ecs_cluster.main.name}/\${aws_ecs_service.api.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}`,
+    cfn: `  ApiService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref Cluster
+      DesiredCount: 2
+      LaunchType: FARGATE
+      TaskDefinition: !Ref ApiTaskDef`,
+  },
+  gw: {
+    desc: "Single entry point: authN at the edge, rate limits per client, request logging. For brownfield, also the strangler routing layer.",
+    specs: { "Service": "API Gateway (HTTP API) / ALB", "Auth": "JWT authorizer against the IdP", "Limits": "Per-key throttling · WAF managed rules upstream", "Observability": "Access logs → centralized, 1 yr retention" },
+    cost: 35,
+    tf: `resource "aws_apigatewayv2_api" "gw" {
+  name          = "\${local.name_prefix}-gw"
+  protocol_type = "HTTP"
+  tags          = local.tags
+}
+
+resource "aws_apigatewayv2_authorizer" "jwt" {
+  api_id           = aws_apigatewayv2_api.gw.id
+  authorizer_type  = "JWT"
+  identity_sources = ["$request.header.Authorization"]
+  name             = "oidc"
+
+  jwt_configuration {
+    audience = [var.oidc_audience]
+    issuer   = var.oidc_issuer
+  }
+}`,
+    cfn: `  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      ProtocolType: HTTP`,
+  },
+  cdn: {
+    desc: "Edge termination: static assets, cacheable API responses, TLS, and DDoS absorption. WAF managed rules in blocking mode.",
+    specs: { "Service": "CloudFront + AWS WAF", "Caching": "Assets 1 yr immutable · API per-route TTLs", "Security": "TLS 1.2+ · OWASP managed rule set · geo controls available" },
+    cost: 45,
+    tf: `resource "aws_cloudfront_distribution" "cdn" {
+  enabled         = true
+  is_ipv6_enabled = true
+  web_acl_id      = aws_wafv2_web_acl.main.arn
+
+  origin {
+    domain_name = aws_lb.main.dns_name
+    origin_id   = "app"
+    custom_origin_config {
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+      http_port              = 80
+      https_port             = 443
+    }
+  }
+
+  default_cache_behavior {
+    target_origin_id       = "app"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+    cached_methods         = ["GET", "HEAD"]
+    cache_policy_id        = data.aws_cloudfront_cache_policy.optimized.id
+  }
+
+  restrictions { geo_restriction { restriction_type = "none" } }
+  viewer_certificate { cloudfront_default_certificate = true }
+  tags = local.tags
+}`,
+    cfn: null,
+  },
+  auth: {
+    desc: "Identity broker: OIDC for the product, SAML federation for enterprise customers later. Buy, don't build.",
+    specs: { "Service": "Cognito or Auth0", "Protocols": "OIDC · PKCE for SPA · SAML federation (roadmap)", "MFA": "TOTP enforced for admin roles", "Tokens": "15 min access / rotating refresh" },
+    cost: 50,
+    tf: `resource "aws_cognito_user_pool" "main" {
+  name = "\${local.name_prefix}-users"
+
+  password_policy {
+    minimum_length    = 12
+    require_lowercase = true
+    require_numbers   = true
+  }
+
+  mfa_configuration = "OPTIONAL"
+  tags              = local.tags
+}`,
+    cfn: null,
+  },
+  worker: {
+    desc: "Async consumers: emails, exports, third-party syncs. Same codebase as the API (modular monolith), different entrypoint.",
+    specs: { "Runtime": "ECS Fargate · queue-depth autoscaling", "Sizing": "1 vCPU / 2 GiB × 1–8 tasks", "Retries": "Backoff + DLQ · idempotency keys on all jobs" },
+    cost: 110,
+    tf: `resource "aws_ecs_service" "worker" {
+  name            = "\${local.name_prefix}-worker"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.worker.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets         = local.private_subnets
+    security_groups = [aws_security_group.worker.id]
+  }
+}`,
+    cfn: null,
+  },
+  obs: {
+    desc: "Observability baseline from day one: structured logs, traces, RED dashboards, and alerts wired to on-call.",
+    specs: { "Stack": "CloudWatch + OpenTelemetry (or Datadog)", "Golden signals": "Rate, errors, duration per route · queue depth · DB saturation", "Alerting": "p95 latency, 5xx rate, DLQ depth → PagerDuty" },
+    cost: 150,
+    tf: `resource "aws_cloudwatch_metric_alarm" "api_5xx" {
+  alarm_name          = "\${local.name_prefix}-api-5xx"
+  namespace           = "AWS/ApplicationELB"
+  metric_name         = "HTTPCode_Target_5XX_Count"
+  statistic           = "Sum"
+  period              = 60
+  evaluation_periods  = 5
+  threshold           = 10
+  comparison_operator = "GreaterThanThreshold"
+  alarm_actions       = [aws_sns_topic.oncall.arn]
+  tags                = local.tags
+}`,
+    cfn: null,
+  },
+  pay: {
+    desc: "Payments isolated behind its own service boundary: PCI scope containment, idempotent operations, double-entry ledger.",
+    specs: { "Runtime": "Dedicated ECS service · separate task role", "Pattern": "Idempotency keys · outbox → event bus · nightly PSP reconciliation", "Compliance": "SAQ-A posture — card data never touches our infra" },
+    cost: 120,
+    tf: `resource "aws_ecs_service" "payments" {
+  name            = "\${local.name_prefix}-payments"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.payments.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets         = local.private_subnets
+    security_groups = [aws_security_group.payments.id]
+  }
+}`,
+    cfn: null,
+  },
+  aisvc: {
+    desc: "Thin service owning prompts, retrieval, guardrails, and evals. The product never calls the LLM provider directly.",
+    specs: { "Runtime": "ECS Fargate · streaming responses", "Guardrails": "Input/output filters · per-tenant token budgets · response cache", "Evals": "Golden-set regression on every prompt change" },
+    cost: 140,
+    tf: `resource "aws_ecs_service" "ai" {
+  name            = "\${local.name_prefix}-ai"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.ai.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+}
+
+resource "aws_secretsmanager_secret" "llm_api_key" {
+  name = "\${local.name_prefix}/llm-api-key"
+  tags = local.tags
+}`,
+    cfn: null,
+  },
+  vec: {
+    desc: "Vector store for retrieval. Start with pgvector in the existing Postgres; move to a dedicated store only if recall/scale demands it.",
+    specs: { "Engine": "pgvector extension (initially)", "Index": "HNSW · cosine", "Why not dedicated": "One less system; revisit past ~10M vectors" },
+    cost: 0,
+    tf: `# pgvector lives inside the main Postgres instance:
+resource "null_resource" "enable_pgvector" {
+  provisioner "local-exec" {
+    command = "psql \${var.db_url} -c 'CREATE EXTENSION IF NOT EXISTS vector;'"
+  }
+}`,
+    cfn: null,
+  },
+  ws: {
+    desc: "Long-lived WebSocket connections isolated from the request/response tier so deploys never drop sessions.",
+    specs: { "Service": "API Gateway WebSocket / dedicated Fargate tier", "Fan-out": "Subscribed to the event bus", "Scale": "Connection-count autoscaling" },
+    cost: 70,
+    tf: `resource "aws_apigatewayv2_api" "ws" {
+  name                       = "\${local.name_prefix}-ws"
+  protocol_type              = "WEBSOCKET"
+  route_selection_expression = "$request.body.action"
+  tags                       = local.tags
+}`,
+    cfn: null,
+  },
+  os: {
+    desc: "Full-text and faceted search. Indexed asynchronously off the event bus — search lags writes by seconds, by design.",
+    specs: { "Service": "OpenSearch · 3 × r7g.large.search", "HA": "3 AZs · dedicated masters at scale", "Security": "Fine-grained access control · VPC-only" },
+    cost: 420,
+    tf: `resource "aws_opensearch_domain" "search" {
+  domain_name    = "\${local.name_prefix}-search"
+  engine_version = "OpenSearch_2.13"
+
+  cluster_config {
+    instance_type  = "r7g.large.search"
+    instance_count = 3
+    zone_awareness_enabled = true
+  }
+
+  ebs_options {
+    ebs_enabled = true
+    volume_size = 100
+  }
+  tags = local.tags
+}`,
+    cfn: null,
+  },
+  dr: {
+    desc: "Warm standby in a second region: replicated data tier, pre-provisioned (scaled-down) app tier, DNS failover.",
+    specs: { "Posture": "Warm standby · RTO ≈ 15 min · RPO ≈ 1 min", "Data": "Cross-region read replica, promotable", "Failover": "Route 53 health checks · quarterly game days" },
+    cost: 380,
+    tf: `resource "aws_db_instance" "replica_dr" {
+  provider            = aws.dr_region
+  identifier          = "\${local.name_prefix}-pg-dr"
+  replicate_source_db = aws_db_instance.main.arn
+  instance_class      = "db.r6g.large"
+  tags                = local.tags
+}
+
+resource "aws_route53_health_check" "primary" {
+  fqdn              = aws_lb.main.dns_name
+  type              = "HTTPS"
+  resource_path     = "/health"
+  failure_threshold = 3
+  request_interval  = 30
+}`,
+    cfn: null,
+  },
+  // ----- brownfield target -----
+  orders: {
+    desc: "First strangler extraction. Owns the order lifecycle end-to-end, including its own schema — no reach-back into Oracle.",
+    specs: { "Runtime": "Spring Boot / ECS Fargate", "Data": "Own Postgres schema · consumes legacy via CDC topics", "Cutover": "Shadow traffic → 1% canary → 100% at the gateway" },
+    cost: 175,
+    tf: `resource "aws_ecs_service" "orders" {
+  name            = "\${local.name_prefix}-orders"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.orders.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets         = local.private_subnets
+    security_groups = [aws_security_group.orders.id]
+  }
+}`,
+    cfn: null,
+  },
+  cust: {
+    desc: "Second extraction, applying the pattern proven on Orders. Owns customer master data going forward.",
+    specs: { "Runtime": "Spring Boot / ECS Fargate", "Data": "Own Postgres schema · publishes customer-changed events", "MDM note": "Becomes the system of record once the monolith's writes are cut over" },
+    cost: 175,
+    tf: `resource "aws_ecs_service" "customers" {
+  name            = "\${local.name_prefix}-customers"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.customers.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+}`,
+    cfn: null,
+  },
+  bus: {
+    desc: "Integration backbone for extracted services and CDC streams. Managed Kafka — the team shouldn't run ZooKeeper in year one.",
+    specs: { "Service": "Amazon MSK · 3 × kafka.m7g.large", "Governance": "Schema registry, BACKWARD compatibility enforced", "Retention": "7 d default · compacted topics for entity state" },
+    cost: 580,
+    tf: `resource "aws_msk_cluster" "bus" {
+  cluster_name           = "\${local.name_prefix}-bus"
+  kafka_version          = "3.7.x"
+  number_of_broker_nodes = 3
+
+  broker_node_group_info {
+    instance_type   = "kafka.m7g.large"
+    client_subnets  = local.private_subnets
+    security_groups = [aws_security_group.kafka.id]
+    storage_info {
+      ebs_storage_info { volume_size = 500 }
+    }
+  }
+  tags = local.tags
+}`,
+    cfn: `  KafkaCluster:
+    Type: AWS::MSK::Cluster
+    Properties:
+      ClusterName: integration-bus
+      KafkaVersion: "3.7.x"
+      NumberOfBrokerNodes: 3
+      BrokerNodeGroupInfo:
+        InstanceType: kafka.m7g.large
+        ClientSubnets: [!Ref SubnetA, !Ref SubnetB, !Ref SubnetC]`,
+  },
+  cdc: {
+    desc: "Debezium tails Oracle redo logs and publishes row-level changes to Kafka — new services consume legacy data with zero monolith changes.",
+    specs: { "Stack": "Debezium on MSK Connect", "Lag SLO": "< 30 s, alarmed", "Reconciliation": "Weekly row-count + checksum job Oracle ↔ Postgres", "Licence flag": "Confirm Oracle licence permits log mining" },
+    cost: 160,
+    tf: `resource "aws_mskconnect_connector" "oracle_cdc" {
+  name                 = "\${local.name_prefix}-oracle-cdc"
+  kafkaconnect_version = "2.7.1"
+
+  connector_configuration = {
+    "connector.class" = "io.debezium.connector.oracle.OracleConnector"
+    "database.hostname" = var.oracle_host
+    "database.dbname"   = var.oracle_sid
+    "table.include.list" = "APP.ORDERS,APP.CUSTOMERS"
+    "snapshot.mode"      = "initial"
+  }
+
+  capacity {
+    provisioned_capacity {
+      mcu_count    = 2
+      worker_count = 1
+    }
+  }
+}`,
+    cfn: null,
+  },
+  // ----- data platform -----
+  kafka: {
+    desc: "Single ingestion backbone: product events and CDC streams land here before anything else touches them.",
+    specs: { "Service": "Amazon MSK · 3 × kafka.m7g.large", "Throughput": "Sized for 50k events/s sustained, 10× burst", "Governance": "Schema registry mandatory on all topics" },
+    cost: 580,
+    tf: `resource "aws_msk_cluster" "ingest" {
+  cluster_name           = "\${local.name_prefix}-ingest"
+  kafka_version          = "3.7.x"
+  number_of_broker_nodes = 3
+
+  broker_node_group_info {
+    instance_type   = "kafka.m7g.large"
+    client_subnets  = local.private_subnets
+    security_groups = [aws_security_group.kafka.id]
+    storage_info {
+      ebs_storage_info { volume_size = 1000 }
+    }
+  }
+  tags = local.tags
+}`,
+    cfn: null,
+  },
+  lake: {
+    desc: "Lakehouse on open table formats: raw (Bronze) through modelled (Gold) zones, readable by any engine.",
+    specs: { "Storage": "S3 + Apache Iceberg · AWS Glue catalog", "Layout": "Bronze / Silver / Gold · PII masked at Silver", "Lifecycle": "Bronze → IA after 90 d" },
+    cost: 180,
+    tf: `resource "aws_s3_bucket" "lake" {
+  bucket = "\${local.name_prefix}-lake"
+  tags   = local.tags
+}
+
+resource "aws_glue_catalog_database" "lake" {
+  name = "\${replace(local.name_prefix, "-", "_")}_lake"
+}`,
+    cfn: null,
+  },
+  flink: {
+    desc: "Stream processing for the sub-second path: sessionisation, aggregations, feature computation.",
+    specs: { "Service": "Managed Flink (Kinesis Analytics)", "Sizing": "4 KPUs to start", "State": "RocksDB · checkpoints to S3 every 60 s" },
+    cost: 480,
+    tf: `resource "aws_kinesisanalyticsv2_application" "flink" {
+  name                   = "\${local.name_prefix}-stream-proc"
+  runtime_environment    = "FLINK-1_19"
+  service_execution_role = aws_iam_role.flink.arn
+
+  application_configuration {
+    application_code_configuration {
+      code_content_type = "ZIPFILE"
+      code_content {
+        s3_content_location {
+          bucket_arn = aws_s3_bucket.artifacts.arn
+          file_key   = "flink/app.zip"
+        }
+      }
+    }
+  }
+  tags = local.tags
+}`,
+    cfn: null,
+  },
+  dbt: {
+    desc: "Transformation as code: tested, version-controlled SQL models with lineage. Runs on a schedule against the warehouse.",
+    specs: { "Stack": "dbt Core on ECS scheduled tasks (or dbt Cloud)", "Layers": "staging → intermediate → marts", "Quality": "not_null/unique/accepted_values tests gate every run" },
+    cost: 60,
+    tf: `resource "aws_scheduler_schedule" "dbt_hourly" {
+  name                = "\${local.name_prefix}-dbt-run"
+  schedule_expression = "rate(1 hour)"
+
+  flexible_time_window { mode = "OFF" }
+
+  target {
+    arn      = aws_ecs_cluster.main.arn
+    role_arn = aws_iam_role.scheduler.arn
+    ecs_parameters {
+      task_definition_arn = aws_ecs_task_definition.dbt.arn
+      launch_type         = "FARGATE"
+    }
+  }
+}`,
+    cfn: null,
+  },
+  wh: {
+    desc: "Analytical serving layer. Reads Gold tables; auto-suspend keeps idle cost near zero.",
+    specs: { "Engine": "Snowflake (or Trino on the lake)", "Cost controls": "Per-team resource monitors · auto-suspend 60 s", "Access": "SSO · row-level policies on PII marts" },
+    cost: 800,
+    tf: `# Snowflake is provisioned via its own provider:
+resource "snowflake_warehouse" "analytics" {
+  name           = "ANALYTICS_WH"
+  warehouse_size = "MEDIUM"
+  auto_suspend   = 60
+  auto_resume    = true
+}`,
+    cfn: null,
+  },
+  elt: {
+    desc: "Managed connectors for SaaS sources. Connector maintenance is undifferentiated heavy lifting — buy it.",
+    specs: { "Service": "Fivetran / Airbyte Cloud", "Sources": "Salesforce, Stripe, HubSpot, …", "Landing": "Raw schemas in the lake, dbt takes it from there" },
+    cost: 350,
+    tf: `# Managed via the Fivetran provider:
+resource "fivetran_connector" "salesforce" {
+  group_id = fivetran_group.main.id
+  service  = "salesforce"
+
+  destination_schema { name = "salesforce" }
+}`,
+    cfn: null,
+  },
+  rtapi: {
+    desc: "Low-latency feature serving for product surfaces: 'viewers right now', live counters, realtime personalisation inputs.",
+    specs: { "Runtime": "ECS Fargate + ElastiCache for hot features", "SLO": "p99 < 50 ms reads", "Source": "Flink writes features; API only reads" },
+    cost: 190,
+    tf: `resource "aws_ecs_service" "rt_api" {
+  name            = "\${local.name_prefix}-rt-api"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.rt_api.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+}`,
+    cfn: null,
+  },
+  bi: {
+    desc: "Dashboards and the metrics layer. Aim 70%+ of queries at pre-aggregated Gold tables.",
+    specs: { "Stack": "Looker / Metabase / QuickSight", "Governance": "Certified datasets only on exec dashboards" },
+    cost: 250, tf: null, cfn: null,
+  },
+};
+
+/* fallbacks by kind for nodes without a catalog entry */
+const KIND_META = {
+  client:   { desc: "Client application. Built and deployed from its own repo; consumes the platform via the gateway.", cost: 0, specs: { "Delivery": "CI/CD per app · feature-flagged releases" } },
+  external: { desc: "External/SaaS dependency. Integrated via API + webhooks; cost is usage-based.", cost: null, specs: { "Contract": "Webhook signatures verified · sandbox env for testing" } },
+  legacy:   { desc: "Existing estate — part of the current state. No new IaC; it is being strangled, not rebuilt.", cost: null, specs: { "Posture": "Freeze new features · instrument · extract" } },
+  app:      { desc: "Application service on the shared container platform.", cost: 160, specs: { "Runtime": "ECS Fargate · 2 tasks · autoscaling" } },
+  data:     { desc: "Managed data service, private-subnet only, encrypted at rest.", cost: 200, specs: { "Security": "KMS at rest · TLS in transit" } },
+  async:    { desc: "Asynchronous integration component.", cost: 80, specs: { "Delivery": "At-least-once · DLQ + alarm" } },
+  edge:     { desc: "Edge/ingress component: TLS, auth, rate limiting.", cost: 40, specs: { "Security": "TLS 1.2+ · WAF upstream" } },
+  ops:      { desc: "Operational tooling.", cost: 120, specs: { "Wiring": "Alerts → on-call rotation" } },
+};
+
+function metaFor(node) {
+  const cat = CATALOG[node.id] || {};
+  const fb = KIND_META[node.kind] || KIND_META.app;
+  return {
+    desc: cat.desc || fb.desc,
+    specs: cat.specs || fb.specs,
+    cost: "cost" in cat ? cat.cost : fb.cost,
+    tf: cat.tf || null,
+    cfn: cat.cfn || null,
+  };
+}
+
+function fmtCost(c) {
+  if (c === null) return "n/a";
+  if (c === 0) return "$0";
+  return "$" + c.toLocaleString();
+}
+
+function totalCost(spec) {
+  return spec.states.target.nodes.reduce((sum, n) => sum + (metaFor(n).cost || 0), 0);
+}
+
+/* =====================================================================
+   BUILD-PACK GENERATORS  (spec → Terraform / CFN / ADRs / backlog)
+   ===================================================================== */
+
+function buildableNodes(spec) {
+  return spec.states.target.nodes.filter(n => metaFor(n).tf);
+}
+
+function genTerraform(spec) {
+  const nodes = buildableNodes(spec);
+  let out = `# ============================================================
+# ${spec.title} — Terraform skeleton
+# Generated by ArchitectAI (mockup) · spec v${spec._version || 1}
+#
+# Review before applying: wire in your org's state backend,
+# VPC module, tagging standards, and account structure.
+# ============================================================
+
+terraform {
+  required_version = ">= 1.8"
+  required_providers {
+    aws = { source = "hashicorp/aws", version = "~> 5.0" }
+  }
+  # backend "s3" { ... }   # TODO: org state backend
+}
+
+provider "aws" {
+  region = var.region
+}
+
+locals {
+  name_prefix     = var.project_name
+  private_subnets = var.private_subnet_ids   # TODO: from your VPC module
+  tags = {
+    Project   = var.project_name
+    ManagedBy = "terraform"
+    Source    = "architectai-spec-v${spec._version || 1}"
+  }
+}
+`;
+  for (const n of nodes) {
+    const m = metaFor(n);
+    out += `\n# ------------------------------------------------------------\n`;
+    out += `# ${n.label}${n.sub ? " — " + n.sub : ""}\n`;
+    out += `# ------------------------------------------------------------\n`;
+    out += m.tf + "\n";
+  }
+  const skipped = spec.states.target.nodes.filter(n => !metaFor(n).tf);
+  if (skipped.length) {
+    out += `\n# Not provisioned here (clients, SaaS, legacy estate):\n`;
+    out += skipped.map(n => `#   - ${n.label} (${n.sub || n.kind})`).join("\n") + "\n";
+  }
+  return out;
+}
+
+function genCloudFormation(spec) {
+  const nodes = spec.states.target.nodes;
+  let out = `AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  ${spec.title} — generated by ArchitectAI (mockup), spec v${spec._version || 1}.
+  Partial template: components marked TODO have Terraform snippets instead
+  (see the Terraform artifact), or are clients/SaaS/legacy estate.
+
+Resources:
+`;
+  let any = false;
+  for (const n of nodes) {
+    const m = metaFor(n);
+    if (m.cfn) { out += `\n  # --- ${n.label}${n.sub ? " — " + n.sub : ""} ---\n` + m.cfn + "\n"; any = true; }
+  }
+  if (!any) out += "  # (no CFN-mapped components in this design — see Terraform artifact)\n";
+  const todo = nodes.filter(n => !metaFor(n).cfn);
+  if (todo.length) {
+    out += `\n  # TODO (not in this template):\n`;
+    out += todo.map(n => `  #   - ${n.label}`).join("\n") + "\n";
+  }
+  return out;
+}
+
+function genADRs(spec) {
+  const date = new Date().toISOString().slice(0, 10);
+  let out = `# Architecture Decision Records — ${spec.title}\n`;
+  out += `_Generated by ArchitectAI (mockup) · ${date} · spec v${spec._version || 1}_\n`;
+  spec.doc.decisions.forEach(([title, rationale], i) => {
+    const n = String(i + 1).padStart(3, "0");
+    out += `\n---\n\n## ADR-${n}: ${title}\n\n`;
+    out += `**Status:** Proposed · **Date:** ${date}\n\n`;
+    out += `### Context\n\n${rationale}\n\n`;
+    out += `### Decision\n\nWe will adopt: **${title.toLowerCase()}**.\n\n`;
+    out += `### Consequences\n\nThe trade-offs above are accepted. Revisit if the underlying assumptions (scale, team size, compliance scope) change materially.\n`;
+  });
+  return out;
+}
+
+function genBacklogRows(spec) {
+  const rows = []; // [type, summary, description, epic, estimate]
+  const phases = spec.doc.phases;
+  const epicNames = phases.map(([t]) => t.split("·")[0].trim());
+
+  phases.forEach(([t, desc], i) => {
+    rows.push(["Epic", epicNames[i] + ": " + t.split("·").slice(1).join("·").trim(), desc, "", ""]);
+  });
+
+  const firstEpic = epicNames[0] || "Phase 1";
+  rows.push(["Story", "Stand up CI/CD pipeline", "Trunk-based, build + test + deploy to a dev environment on every merge.", firstEpic, "5"]);
+  rows.push(["Story", "Provision base networking & accounts", "VPC, subnets, IAM baseline per the Terraform skeleton.", firstEpic, "8"]);
+
+  for (const n of spec.states.target.nodes) {
+    const m = metaFor(n);
+    if (n.kind === "legacy") continue;
+    const verb = m.tf ? "Provision & configure" : n.kind === "client" ? "Scaffold" : "Integrate";
+    const epic = epicNames[Math.min(n.kind === "client" || m.tf ? 0 : 1, epicNames.length - 1)] || firstEpic;
+    rows.push(["Story", `${verb} ${n.label}`, `${m.desc} ${n.sub ? "(" + n.sub + ")" : ""}`.trim(), epic, m.tf ? "5" : "3"]);
+  }
+  rows.push(["Story", "Observability baseline", "Dashboards for golden signals, alerts wired to on-call.", firstEpic, "5"]);
+  rows.push(["Story", "Security review & threat model", "STRIDE pass over the design; findings become backlog items.", epicNames[epicNames.length - 1] || firstEpic, "8"]);
+  return rows;
+}
+
+function genBacklogCSV(spec) {
+  const q = s => `"${String(s).replace(/"/g, '""')}"`;
+  const rows = genBacklogRows(spec);
+  return ["Type,Summary,Description,Epic,Estimate"]
+    .concat(rows.map(r => r.map(q).join(",")))
+    .join("\n");
+}
+
+/* =====================================================================
    SCENARIO LIBRARY
    ===================================================================== */
 
@@ -340,6 +1099,23 @@ function classify(text) {
 
 const REFINEMENTS = [
   {
+    match: /(terraform|cloud ?formation|\biac\b|infra(structure)? as code|build pack|hand ?-?(off|over)|backlog|jira|adr|provision)/i,
+    apply(spec) {
+      const nodes = buildableNodes(spec);
+      const total = totalCost(spec);
+      setTimeout(() => switchTab("build"), 200);
+      return (
+        `I've opened the **Build** tab with the engineering hand-off pack for this design:\n\n` +
+        `• **Terraform** — a reviewed skeleton covering **${nodes.length} provisionable components** (clients, SaaS, and legacy estate are listed but intentionally excluded). TODOs mark where your org's VPC module, state backend, and tagging standards plug in.\n` +
+        `• **CloudFormation** — the same components for CFN shops, with gaps flagged.\n` +
+        `• **ADRs** — one Architecture Decision Record per decision in the doc, ready to drop into your repo.\n` +
+        `• **Backlog** — epics mapped to the delivery phases plus provisioning/implementation stories, downloadable as CSV for Jira import.\n\n` +
+        `Indicative run cost for the provisioned estate is **≈ ${fmtCost(total)}/month** at launch scale (the Design Doc has the per-component breakdown).\n\n` +
+        `You can also click any single component in the diagram to grab just its spec sheet and IaC snippet.`
+      );
+    },
+  },
+  {
     match: /(add|put|include).*(redis|cach)/i,
     apply(spec) {
       const st = spec.states.target;
@@ -482,7 +1258,7 @@ function renderSVG(state, { animate = true } = {}) {
   for (const { x, y, w, h, node } of pos.values()) {
     const c = KIND_COLORS[node.kind] || KIND_COLORS.app;
     const delay = animate ? ` style="animation-delay:${j * 0.06}s"` : "";
-    out += `<g class="node-g"${delay}>`;
+    out += `<g class="node-g clickable" data-node="${esc(node.id)}"${delay}>`;
     out += `<rect class="node-rect" x="${x}" y="${y}" width="${w}" height="${h}" rx="10" fill="${c.fill}" stroke="${c.stroke}"/>`;
     out += `<text class="node-label" x="${x + 13}" y="${y + 24}">${esc(node.label)}</text>`;
     out += `<text class="node-sub" x="${x + 13}" y="${y + 41}">${esc(node.sub || "")}</text>`;
@@ -513,11 +1289,15 @@ function renderDoc(spec) {
   for (const [t, r] of d.decisions) html += `<tr><td>${esc(t)}</td><td>${esc(r)}</td></tr>`;
   html += `</table>`;
 
-  html += `<h2>3. Components</h2><ul>`;
+  html += `<h2>3. Components &amp; Indicative Run Cost</h2>`;
+  html += `<p>Click any component in the diagram for its full spec sheet and IaC snippet. Costs are order-of-magnitude monthly estimates at launch scale, excluding egress and people.</p>`;
+  html += `<table><tr><th>Component</th><th>Notes</th><th style="text-align:right">Est. / month</th></tr>`;
   for (const n of spec.states.target.nodes) {
-    html += `<li><b>${esc(n.label)}</b>${n.sub ? " — " + esc(n.sub) : ""}</li>`;
+    const m = metaFor(n);
+    html += `<tr><td>${esc(n.label)}</td><td>${esc(n.sub || "")}</td><td style="text-align:right">${esc(fmtCost(m.cost))}</td></tr>`;
   }
-  html += `</ul>`;
+  html += `<tr class="cost-total"><td>Total (provisioned)</td><td></td><td style="text-align:right">≈ ${esc(fmtCost(totalCost(spec)))}</td></tr>`;
+  html += `</table>`;
 
   html += `<h2>4. Non-Functional Requirements</h2><table><tr><th>Quality</th><th>Target / Approach</th></tr>`;
   for (const [q, v] of d.nfrs) html += `<tr><td>${esc(q)}</td><td>${esc(v)}</td></tr>`;
@@ -557,6 +1337,7 @@ const STARTERS = [
 ];
 
 const FOLLOWUPS = [
+  { label: "Generate the build pack", text: "Generate the Terraform and build pack for this design" },
   { label: "Add a Redis cache", text: "Add a Redis cache" },
   { label: "Make it multi-region", text: "Make it multi-region with disaster recovery" },
   { label: "What are the main risks?", text: "What are the main risks of this design?" },
@@ -644,14 +1425,16 @@ function summaryFor(spec, kind, addons) {
     return (
       "This is a **brownfield modernisation**, so I've designed it as a strangler-fig programme rather than a rewrite.\n\n" +
       "**Approach:** an API gateway goes in front of the monolith first (zero behaviour change), then domains are extracted one at a time — Orders first, since it has the clearest boundary and highest change rate. Debezium CDC taps Oracle's redo logs so new services get legacy data without touching monolith code. Every cutover is a gateway routing change, instantly reversible.\n\n" +
-      "Use the **Current state / Target state** toggle above the diagram to compare. The Design Doc has the full decision log, risk register (note the Oracle licensing flag), and a 6-quarter migration roadmap.\n\n" +
+      "Use the **Current state / Target state** toggle above the diagram to compare. The Design Doc has the full decision log, risk register (note the Oracle licensing flag), an indicative run-cost breakdown, and a 6-quarter migration roadmap.\n\n" +
+      "When you're ready to mobilise: **click any component** for its spec sheet and IaC snippet, or open the **Build** tab for the full hand-off pack — Terraform for the new estate, ADRs, and a phased backlog for Jira.\n\n" +
       "What would you like to pressure-test — the extraction order, the data strategy, or the team topology?"
     );
   }
   if (kind === "data") {
     return (
       "I've designed a **streaming-first lakehouse** — one ingestion backbone (Kafka) feeding both the realtime path (Flink) and the analytical path (Iceberg → dbt → warehouse), so you avoid maintaining two parallel pipelines.\n\n" +
-      "Key call: open table formats on S3 mean your raw data is never locked into one warehouse vendor. The Design Doc covers freshness targets, governance (schema registry is non-negotiable), and a phased rollout that ships dashboards before the harder realtime path.\n\n" +
+      "Key call: open table formats on S3 mean your raw data is never locked into one warehouse vendor. The Design Doc covers freshness targets, governance (schema registry is non-negotiable), run costs, and a phased rollout that ships dashboards before the harder realtime path.\n\n" +
+      "**Click any component** for sizing and its Terraform snippet, or open the **Build** tab for the full pack (IaC, ADRs, backlog).\n\n" +
       "Want me to adjust for a different scale, add ML feature serving, or talk through the Flink-vs-micro-batch trade-off?"
     );
   }
@@ -665,7 +1448,7 @@ function summaryFor(spec, kind, addons) {
     `Here's a first-pass design — **${n} components** across clients, edge, application, data, and async tiers.\n\n` +
     "**Shape:** a modular monolith on managed AWS services. At this stage, one well-structured deployable beats microservices — you get speed now and clean seams (gateway, event bus) to split along later." +
     (extras.length ? `\n\nFrom your description I also included ${extras.join("; ")}.` : "") +
-    "\n\nThe **Design Doc** tab has the decision log with rationale, NFR targets, risks, and a 12-week delivery plan; the **Spec** tab has the machine-readable version.\n\nRefine it in plain language — e.g. *“add a Redis cache”*, *“make it multi-region”*, or *“remove the workers”*."
+    "\n\nThe **Design Doc** tab has the decision log, NFR targets, risks, an indicative run-cost table, and a 12-week delivery plan. **Click any component in the diagram** for its spec sheet, sizing, cost, and Terraform/CloudFormation snippet — and the **Build** tab has the full engineering hand-off pack (IaC, ADRs, Jira-ready backlog).\n\nRefine it in plain language — e.g. *“add a Redis cache”*, *“make it multi-region”* — or say *“generate the build pack”*."
   );
 }
 
@@ -760,10 +1543,143 @@ function renderAll() {
 
   const state = activeSpec.states[activeState] || activeSpec.states.target;
   $("diagram-host").innerHTML = renderSVG(state);
+  $("diagram-hint").hidden = false;
+  closeDrawer();
   renderDoc(activeSpec);
+  renderBuild();
   $("spec-host").textContent = JSON.stringify(
     { title: activeSpec.title, scenario: activeSpec.scenario, version: activeSpec._version, states: activeSpec.states },
     null, 2);
+}
+
+/* ----- node spec drawer ----- */
+
+let drawerIacMode = "tf";
+
+function openDrawer(nodeId) {
+  const state = activeSpec.states[activeState] || activeSpec.states.target;
+  const node = state.nodes.find(n => n.id === nodeId);
+  if (!node) return;
+  const m = metaFor(node);
+  const c = KIND_COLORS[node.kind] || KIND_COLORS.app;
+
+  document.querySelectorAll("#diagram-host .node-g").forEach(g =>
+    g.classList.toggle("selected", g.dataset.node === nodeId));
+
+  const badge = $("drawer-badge");
+  badge.textContent = c.badge;
+  badge.style.color = c.stroke;
+  badge.style.borderColor = c.stroke;
+  $("drawer-title").textContent = node.label;
+  $("drawer-sub").textContent = node.sub || "";
+
+  let html = `<p>${esc(m.desc)}</p>`;
+  html += `<h4>Spec</h4><table class="kv">`;
+  for (const [k, v] of Object.entries(m.specs)) html += `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`;
+  html += `</table>`;
+
+  html += `<h4>Indicative cost</h4><div class="cost-line"><span class="cost-num">${esc(fmtCost(m.cost))}</span><span class="cost-per">${m.cost === null ? (node.kind === "legacy" ? "existing estate" : "usage-based / external") : "per month, launch scale"}</span></div>`;
+
+  if (m.tf) {
+    html += `<h4>Infrastructure as code</h4>`;
+    html += `<div class="iac-tabs">
+      <button class="iac-tab ${drawerIacMode === "tf" ? "active" : ""}" data-iac="tf">Terraform</button>
+      <button class="iac-tab ${drawerIacMode === "cfn" ? "active" : ""}" data-iac="cfn" ${m.cfn ? "" : "disabled title='No CFN snippet for this component in the mockup'"}>CloudFormation</button>
+    </div>`;
+    const code = drawerIacMode === "cfn" && m.cfn ? m.cfn : m.tf;
+    html += `<pre class="codeblock" id="drawer-code">${esc(code)}</pre>`;
+    html += `<div class="drawer-iac-actions">
+      <button class="btn btn-ghost btn-sm" id="drawer-copy">Copy</button>
+      <button class="btn btn-sm btn-primary" id="drawer-dl">Download ${drawerIacMode === "cfn" && m.cfn ? node.id + ".yaml" : node.id + ".tf"}</button>
+    </div>`;
+  } else {
+    html += `<h4>Infrastructure as code</h4><p style="color:var(--text-dim);font-size:12.5px">No IaC for this component — ${node.kind === "client" ? "it's a client application with its own delivery pipeline." : node.kind === "legacy" ? "it's existing estate being strangled, not rebuilt." : "it's an external/SaaS dependency configured in its own console or provider."}</p>`;
+  }
+
+  $("drawer-body").innerHTML = html;
+  $("drawer").hidden = false;
+
+  const codeEl = $("drawer-code");
+  document.querySelectorAll(".iac-tab").forEach(b => b.onclick = () => {
+    if (b.disabled) return;
+    drawerIacMode = b.dataset.iac;
+    openDrawer(nodeId);
+  });
+  const copyBtn = $("drawer-copy");
+  if (copyBtn) copyBtn.onclick = async () => {
+    try { await navigator.clipboard.writeText(codeEl.textContent); toast("Snippet copied"); }
+    catch { toast("Clipboard unavailable"); }
+  };
+  const dlBtn = $("drawer-dl");
+  if (dlBtn) dlBtn.onclick = () => {
+    const isCfn = drawerIacMode === "cfn" && m.cfn;
+    downloadText(codeEl.textContent, node.id + (isCfn ? ".yaml" : ".tf"), isCfn ? "text/yaml" : "text/plain");
+  };
+}
+
+function closeDrawer() {
+  $("drawer").hidden = true;
+  document.querySelectorAll("#diagram-host .node-g.selected").forEach(g => g.classList.remove("selected"));
+}
+
+/* ----- build pane ----- */
+
+let activeArtifact = "terraform";
+
+const ARTIFACTS = {
+  terraform: {
+    note: spec => `Terraform skeleton for the target state — ${buildableNodes(spec).length} provisionable components. TODOs mark where your org's state backend, VPC module, and tagging standards plug in. Clients, SaaS, and legacy estate are intentionally excluded and listed at the bottom.`,
+    text: genTerraform, file: "main.tf", mime: "text/plain", code: true,
+  },
+  cloudformation: {
+    note: () => `CloudFormation rendering of the same design for CFN shops. Components without a CFN mapping in this mockup are flagged as TODO — the Terraform artifact is the complete one.`,
+    text: genCloudFormation, file: "template.yaml", mime: "text/yaml", code: true,
+  },
+  adr: {
+    note: () => `One Architecture Decision Record per decision in the design doc, in the standard Context / Decision / Consequences format. Drop into your repo under /docs/adr and review in the next architecture forum.`,
+    text: genADRs, file: "adrs.md", mime: "text/markdown", code: true,
+  },
+  backlog: {
+    note: () => `Delivery backlog derived from the phased plan: one epic per phase, stories for provisioning and implementation. Download as CSV for Jira import (Type, Summary, Description, Epic, Estimate).`,
+    text: genBacklogCSV, file: "backlog.csv", mime: "text/csv", code: false,
+  },
+};
+
+function renderBuild() {
+  if (!activeSpec) return;
+  const art = ARTIFACTS[activeArtifact];
+  $("build-note").textContent = art.note(activeSpec);
+  document.querySelectorAll(".artifact-tab").forEach(b =>
+    b.classList.toggle("active", b.dataset.artifact === activeArtifact));
+
+  if (art.code) {
+    $("build-host").hidden = false;
+    $("backlog-host").hidden = true;
+    $("build-host").textContent = art.text(activeSpec);
+  } else {
+    $("build-host").hidden = true;
+    $("backlog-host").hidden = false;
+    const rows = genBacklogRows(activeSpec);
+    let html = `<table><tr><th>Type</th><th>Summary</th><th>Description</th><th>Epic</th><th>Est.</th></tr>`;
+    for (const [type, sum, desc, epic, est] of rows) {
+      html += `<tr><td><span class="bk-type ${type === "Epic" ? "bk-epic" : "bk-story"}">${esc(type)}</span></td><td>${esc(sum)}</td><td>${esc(desc)}</td><td>${esc(epic)}</td><td>${esc(est)}</td></tr>`;
+    }
+    $("backlog-host").innerHTML = html + `</table>`;
+  }
+}
+
+function downloadText(text, filename, mime) {
+  const blob = new Blob([text], { type: mime });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function switchTab(name) {
+  document.querySelectorAll(".ws-tab").forEach(t => t.classList.toggle("active", t.dataset.tab === name));
+  document.querySelectorAll(".ws-pane").forEach(p => p.classList.toggle("active", p.id === "pane-" + name));
 }
 
 /* =====================================================================
@@ -809,9 +1725,36 @@ for (const s of STARTERS) {
 $("ws-tabs").addEventListener("click", e => {
   const btn = e.target.closest(".ws-tab");
   if (!btn) return;
-  document.querySelectorAll(".ws-tab").forEach(t => t.classList.toggle("active", t === btn));
-  document.querySelectorAll(".ws-pane").forEach(p =>
-    p.classList.toggle("active", p.id === "pane-" + btn.dataset.tab));
+  switchTab(btn.dataset.tab);
+});
+
+// diagram node click → spec drawer
+$("pane-diagram").addEventListener("click", e => {
+  const g = e.target.closest(".node-g[data-node]");
+  if (g && activeSpec) { openDrawer(g.dataset.node); return; }
+});
+$("drawer-close").addEventListener("click", closeDrawer);
+
+// build artifacts
+$("artifact-tabs").addEventListener("click", e => {
+  const btn = e.target.closest(".artifact-tab");
+  if (!btn) return;
+  activeArtifact = btn.dataset.artifact;
+  renderBuild();
+});
+
+$("btn-dl-artifact").addEventListener("click", () => {
+  if (!activeSpec) return toast("No design yet — describe a system first.");
+  const art = ARTIFACTS[activeArtifact];
+  downloadText(art.text(activeSpec), art.file, art.mime);
+});
+
+$("btn-copy-artifact").addEventListener("click", async () => {
+  if (!activeSpec) return toast("No design yet — describe a system first.");
+  try {
+    await navigator.clipboard.writeText(ARTIFACTS[activeArtifact].text(activeSpec));
+    toast(ARTIFACTS[activeArtifact].file + " copied to clipboard");
+  } catch { toast("Clipboard unavailable"); }
 });
 
 // state toggle
@@ -830,9 +1773,18 @@ $("btn-new").addEventListener("click", () => {
   $("followup-chips").innerHTML = "";
   $("ws-placeholder").style.display = "";
   $("diagram-host").innerHTML = "";
+  $("diagram-hint").hidden = true;
   $("doc-host").innerHTML = "";
   $("spec-host").textContent = "";
+  $("build-host").textContent = "";
+  $("build-note").textContent = "";
+  $("backlog-host").innerHTML = "";
   $("state-toggle").hidden = true;
+  activeArtifact = "terraform";
+  document.querySelectorAll(".artifact-tab").forEach(b =>
+    b.classList.toggle("active", b.dataset.artifact === "terraform"));
+  closeDrawer();
+  switchTab("diagram");
 });
 
 // exports
