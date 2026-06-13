@@ -3,7 +3,19 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>ArchitectAI — Describe it. Design it.</title>
+<title>ArchitectAI — Describe it. Design it. Build it.</title>
+<meta name="description" content="An AI-native tool for solution architects: describe a system in plain language and get a structured solution design — architecture diagram, design doc, and the engineering hand-off pack (Terraform, CloudFormation, ADRs, backlog)." />
+
+<!-- Social preview (Open Graph + Twitter) -->
+<meta property="og:type" content="website" />
+<meta property="og:title" content="ArchitectAI — Describe it. Design it. Build it." />
+<meta property="og:description" content="Describe a system in plain language and get a structured solution design: diagram, design doc, and the engineering hand-off pack (Terraform, CloudFormation, ADRs, backlog). Concept prototype — feedback welcome." />
+<meta property="og:image" content="preview.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="ArchitectAI — Describe it. Design it. Build it." />
+<meta name="twitter:description" content="An AI-native solution design tool for architects. Concept prototype — feedback welcome." />
+<meta name="twitter:image" content="preview.png" />
+
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -19,6 +31,7 @@
   <div class="topbar-actions">
     <span class="pill pill-demo">Simulated AI · no backend</span>
     <button class="btn btn-ghost" id="btn-new">＋ New design</button>
+    <button class="btn btn-feedback" id="btn-feedback" hidden>✎ Share feedback</button>
   </div>
 </header>
 

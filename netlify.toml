@@ -1,0 +1,10 @@
+[build]
+  publish = "."
+
+# Static site — no build step. Netlify serves the files as-is.
+# Long-cache the generated preview image, always revalidate the app shell.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "SAMEORIGIN"
+    Referrer-Policy = "strict-origin-when-cross-origin"

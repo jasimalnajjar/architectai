@@ -13,6 +13,13 @@
 
 "use strict";
 
+/* =====================================================================
+   FEEDBACK FORM LINK  ← paste your Google Forms / Tally / Typeform URL here.
+   While this is empty, the "Share feedback" button stays hidden, so a
+   published site never shows a dead link. Set it and the button appears.
+   ===================================================================== */
+const FEEDBACK_URL = "";
+
 /* ---------------------------------------------------------------------
    Spec format
    ---------------------------------------------------------------------
@@ -1822,6 +1829,13 @@ $("btn-json").addEventListener("click", async () => {
     toast("Clipboard unavailable — use the Spec tab to copy manually.");
   }
 });
+
+// feedback button — only shown once FEEDBACK_URL is set
+if (FEEDBACK_URL) {
+  const fb = $("btn-feedback");
+  fb.hidden = false;
+  fb.addEventListener("click", () => window.open(FEEDBACK_URL, "_blank", "noopener"));
+}
 
 let toastTimer;
 function toast(msg) {

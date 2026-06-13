@@ -83,6 +83,9 @@ body {
 .btn:hover { background: var(--bg-input); border-color: #34405c; }
 .btn-ghost { background: transparent; }
 .btn-sm { font-size: 12px; padding: 5px 10px; }
+.btn-feedback { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.btn-feedback:hover { background: rgba(108,140,255,.22); border-color: var(--accent); }
+.btn-feedback[hidden] { display: none; }
 
 /* ===== Layout ===== */
 .layout {

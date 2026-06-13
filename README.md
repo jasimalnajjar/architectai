@@ -24,6 +24,33 @@ xdg-open index.html        # Linux
 python3 -m http.server 8000   # then visit http://localhost:8000
 ```
 
+## Publish it (for sharing / feedback)
+
+Static files, so any static host works. Config for **Netlify** (`netlify.toml`)
+and **Vercel** (`vercel.json`) is included — no build step.
+
+**Netlify (fastest):** go to app.netlify.com → *Add new site → Import an existing
+project* → connect this repo → branch `claude/youthful-ride-x60qta` →
+*Deploy*. (Or drag the project folder onto app.netlify.com/drop for an instant
+no-account-link deploy.)
+
+**Vercel:** vercel.com/new → import the repo → *Deploy*. Framework preset:
+"Other". No build/output settings needed.
+
+**Feedback button:** create a form (Google Forms / Tally / Typeform), paste its
+URL into `FEEDBACK_URL` at the top of `app.js`, and a "Share feedback" button
+appears in the header. While the URL is empty the button stays hidden, so a
+published site never shows a dead link.
+
+**Social preview:** `preview.png` + Open Graph tags in `index.html` make the
+link render a card in Slack/LinkedIn/email. For LinkedIn specifically, change the
+`og:image`/`twitter:image` values to the absolute URL once you know your domain
+(e.g. `https://your-site.netlify.app/preview.png`).
+
+> Note on gating: site-wide password protection is a **paid** feature on both
+> Netlify and Vercel. On the free tier the URL is public but unlisted (not
+> indexed quickly). For free access control, Cloudflare Access has a free tier.
+
 ## What the mockup demonstrates
 
 The core product loop:
