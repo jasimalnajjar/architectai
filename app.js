@@ -1533,9 +1533,14 @@ function done() {
    WORKSPACE RENDERING
    ===================================================================== */
 
+function slugify(s) {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "design";
+}
+
 function renderAll() {
   if (!activeSpec) return;
   $("ws-placeholder").style.display = "none";
+  $("url-text").textContent = "architectai.app/" + slugify(activeSpec.title);
 
   // state toggle for brownfield
   const toggle = $("state-toggle");
@@ -1772,8 +1777,8 @@ $("state-toggle").addEventListener("click", e => {
   renderAll();
 });
 
-// new design
-$("btn-new").addEventListener("click", () => {
+// reset everything back to a blank design
+function resetDesign() {
   activeSpec = null;
   chatMessages.innerHTML = "";
   $("chat-empty").style.display = "";
@@ -1781,6 +1786,7 @@ $("btn-new").addEventListener("click", () => {
   $("ws-placeholder").style.display = "";
   $("diagram-host").innerHTML = "";
   $("diagram-hint").hidden = true;
+  $("url-text").textContent = "architectai.app/new";
   $("doc-host").innerHTML = "";
   $("spec-host").textContent = "";
   $("build-host").textContent = "";
@@ -1792,7 +1798,55 @@ $("btn-new").addEventListener("click", () => {
     b.classList.toggle("active", b.dataset.artifact === "terraform"));
   closeDrawer();
   switchTab("diagram");
+}
+
+// landing ↔ app transitions
+function goHome() {
+  resetDesign();
+  $("app").hidden = true;
+  $("landing").hidden = false;
+  $("landing-text").value = "";
+  landingAutosize();
+  $("landing-text").focus();
+}
+
+function enterApp(text) {
+  if (!text.trim()) return;
+  $("landing").hidden = true;
+  $("app").hidden = false;
+  submitText(text.trim());
+}
+
+$("btn-new").addEventListener("click", goHome);
+$("brand-home").addEventListener("click", goHome);
+
+// landing prompt
+function landingAutosize() {
+  const t = $("landing-text");
+  t.style.height = "auto";
+  t.style.height = Math.min(t.scrollHeight, 160) + "px";
+}
+$("landing-text").addEventListener("input", landingAutosize);
+$("landing-form").addEventListener("submit", e => {
+  e.preventDefault();
+  enterApp($("landing-text").value);
 });
+$("landing-text").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    enterApp($("landing-text").value);
+  }
+});
+
+// hero suggestion chips (same scenarios as the in-app starters)
+for (const s of STARTERS) {
+  const b = document.createElement("button");
+  b.className = "chip";
+  b.innerHTML = s.label;
+  b.onclick = () => enterApp(s.text);
+  $("hero-chips").appendChild(b);
+}
+$("landing-text").focus();
 
 // exports
 $("btn-svg").addEventListener("click", () => {

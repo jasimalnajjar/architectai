@@ -61,9 +61,12 @@ natural language ──→ structured spec (JSON) ──→ diagram + design doc
         └────────────── iterative refinement ──────────┘
 ```
 
-1. **ChatGPT-style interface.** Describe a system in the chat. The "agent" shows
-   working steps, streams its answer, and populates the workspace.
-2. **Three deep scenarios** (use the starter chips):
+1. **Base44-style entry.** A landing hero with one big prompt — *"Describe the
+   system you want to architect…"* — plus example chips. Submitting transitions
+   into the builder: a chat panel on the left and the design output on the right,
+   framed in a browser window (reinforcing *build it*). The logo or "New design"
+   returns you to the prompt.
+2. **Three deep scenarios** (use the example chips):
    - **Greenfield** — SaaS platform; keyword-aware (mentions of payments, AI/ML,
      realtime, mobile, search each add the right components and decisions).
    - **Brownfield** — legacy Java/Oracle monolith migration with a

@@ -20,12 +20,43 @@
 </head>
 <body>
 
+<!-- ===================== LANDING / HERO ===================== -->
+<section id="landing">
+  <nav class="landing-nav">
+    <div class="brand">
+      <div class="brand-mark">A</div>
+      <span class="brand-name">ArchitectAI</span>
+    </div>
+    <span class="pill pill-demo">Simulated AI · concept prototype</span>
+  </nav>
+
+  <div class="hero">
+    <div class="hero-eyebrow">◈ AI-native solution architecture</div>
+    <h1 class="hero-title"><span class="nb">Describe it.</span> <span class="nb grad">Design it.</span> <span class="nb">Build it.</span></h1>
+    <p class="hero-sub">Describe a system in plain language — greenfield or brownfield — and get a
+      structured solution design: architecture diagram, design doc, and the engineering
+      hand-off pack (Terraform, CloudFormation, ADRs, backlog).</p>
+
+    <form class="hero-prompt" id="landing-form">
+      <textarea id="landing-text" rows="1"
+        placeholder="Describe the system you want to architect…"></textarea>
+      <button type="submit" class="hero-send" id="landing-send" title="Design it">➤</button>
+    </form>
+
+    <div class="hero-chips" id="hero-chips"></div>
+    <div class="hero-note">No setup · responses are scripted to demonstrate the product concept</div>
+  </div>
+</section>
+
+<!-- ===================== APP ===================== -->
+<div id="app" hidden>
+
 <header class="topbar">
-  <div class="brand">
+  <div class="brand" id="brand-home" title="Back to start">
     <div class="brand-mark">A</div>
     <div class="brand-text">
       <span class="brand-name">ArchitectAI</span>
-      <span class="brand-tag">MVP mockup — describe it · design it · build it</span>
+      <span class="brand-tag">describe it · design it · build it</span>
     </div>
   </div>
   <div class="topbar-actions">
@@ -65,6 +96,14 @@
 
   <!-- ============ WORKSPACE ============ -->
   <section class="workspace">
+    <div class="browser-chrome">
+      <div class="chrome-dots"><i></i><i></i><i></i></div>
+      <div class="url-pill" id="url-pill"><span class="url-lock">⌁</span><span id="url-text">architectai.app/new</span></div>
+      <div class="chrome-actions">
+        <button class="btn btn-ghost btn-sm" id="btn-svg">Download SVG</button>
+        <button class="btn btn-ghost btn-sm" id="btn-json">Copy JSON</button>
+      </div>
+    </div>
     <div class="ws-header">
       <div class="ws-tabs" id="ws-tabs">
         <button class="ws-tab active" data-tab="diagram">Diagram</button>
@@ -77,8 +116,6 @@
           <button class="state-btn" data-state="current">Current state</button>
           <button class="state-btn active" data-state="target">Target state</button>
         </div>
-        <button class="btn btn-ghost btn-sm" id="btn-svg">Download SVG</button>
-        <button class="btn btn-ghost btn-sm" id="btn-json">Copy JSON</button>
       </div>
     </div>
 
@@ -138,6 +175,7 @@
   </section>
 
 </main>
+</div><!-- /#app -->
 
 <div class="toast" id="toast"></div>
 <script src="app.js"></script>
