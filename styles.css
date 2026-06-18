@@ -229,6 +229,8 @@ body {
   color: var(--text-dim);
 }
 .pill-demo { border-color: #3b3457; color: #b9a7f0; background: rgba(157,108,255,.08); }
+.pill-live { border-color: #2f9e8f; color: #5fd3c0; background: rgba(47,158,143,.10); }
+.pill-live::before { content: "● "; color: #2fd6ad; }
 
 /* ===== Buttons ===== */
 .btn {
