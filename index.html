@@ -61,6 +61,7 @@
   </div>
   <div class="topbar-actions">
     <span class="pill pill-demo">Simulated AI · no backend</span>
+    <button class="btn btn-ghost" id="btn-key" title="Use your own Claude API key in the browser">⚿ Connect Claude</button>
     <button class="btn btn-ghost" id="btn-new">＋ New design</button>
     <button class="btn btn-feedback" id="btn-feedback" hidden>✎ Share feedback</button>
   </div>
@@ -156,6 +157,7 @@
           <div class="artifact-tabs" id="artifact-tabs">
             <button class="artifact-tab active" data-artifact="terraform">Terraform</button>
             <button class="artifact-tab" data-artifact="cloudformation">CloudFormation</button>
+            <button class="artifact-tab" data-artifact="appcode">App Code</button>
             <button class="artifact-tab" data-artifact="adr">ADRs</button>
             <button class="artifact-tab" data-artifact="backlog">Backlog</button>
           </div>
@@ -167,6 +169,23 @@
         <div class="build-note" id="build-note"></div>
         <pre class="codeblock" id="build-host"></pre>
         <div id="backlog-host" class="backlog" hidden></div>
+        <div id="appcode-host" class="appcode" hidden>
+          <div class="appcode-empty" id="appcode-empty">
+            <button class="btn btn-sm btn-primary" id="btn-gen-code">⚙ Generate application code</button>
+            <p class="appcode-hint" id="appcode-hint">Claude generates a runnable starter codebase for this design — service entrypoint, API handlers, schema, Dockerfile, and a README. Requires live mode.</p>
+          </div>
+          <div class="appcode-view" id="appcode-view" hidden>
+            <div class="appcode-bar">
+              <select class="appcode-select" id="appcode-select"></select>
+              <div class="appcode-actions">
+                <button class="btn btn-ghost btn-sm" id="btn-copy-code">Copy file</button>
+                <button class="btn btn-sm btn-primary" id="btn-dl-code">Download file</button>
+                <button class="btn btn-ghost btn-sm" id="btn-regen-code">↻ Regenerate</button>
+              </div>
+            </div>
+            <pre class="codeblock" id="appcode-code"></pre>
+          </div>
+        </div>
       </div>
       <div class="ws-pane" id="pane-spec">
         <pre class="spec" id="spec-host"></pre>
@@ -178,6 +197,13 @@
 </div><!-- /#app -->
 
 <div class="toast" id="toast"></div>
+<!-- Shared LLM contract (system prompts + tool schemas) — used by the in-browser
+     "Connect Claude" path. Loads only over http(s); harmless if it fails on file://. -->
+<script type="module">
+  import * as AD from "./design-prompt.js";
+  window.ArchitectDesign = AD;
+  window.dispatchEvent(new Event("architect-design-ready"));
+</script>
 <script src="app.js"></script>
 </body>
 </html>
