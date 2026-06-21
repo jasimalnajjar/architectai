@@ -24,7 +24,10 @@ import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 
-import { SYSTEM_PROMPT, EMIT_DESIGN_TOOL, normalizeSpec } from "./design-prompt.js";
+import {
+  SYSTEM_PROMPT, EMIT_DESIGN_TOOL, normalizeSpec,
+  CODE_SYSTEM_PROMPT, EMIT_CODE_TOOL, normalizeCode,
+} from "./design-prompt.js";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const PORT = Number(process.env.PORT) || 8787;
@@ -45,6 +48,7 @@ const MIME = {
 
 const STATIC = new Set([
   "/index.html", "/app.js", "/styles.css", "/preview.png", "/favicon.ico",
+  "/design-prompt.js",
 ]);
 
 function sendJSON(res, status, obj) {
@@ -177,6 +181,57 @@ async function handleDesign(req, res) {
   }
 }
 
+async function handleCode(req, res) {
+  if (!client) {
+    return sendJSON(res, 503, {
+      error: "no_api_key",
+      message: "Set ANTHROPIC_API_KEY and restart the server to enable code generation.",
+    });
+  }
+  let payload;
+  try {
+    payload = JSON.parse(await readBody(req) || "{}");
+  } catch {
+    return sendJSON(res, 400, { error: "bad_request", message: "Invalid JSON body." });
+  }
+  const spec = payload.spec;
+  if (!spec || !spec.states) {
+    return sendJSON(res, 400, { error: "bad_request", message: "A design 'spec' is required." });
+  }
+
+  const messages = [{
+    role: "user",
+    content:
+      "Generate the application code build-out for this design.\n```json\n" +
+      JSON.stringify({ title: spec.title, scenario: spec.scenario, states: spec.states, doc: spec.doc }) +
+      "\n```",
+  }];
+
+  try {
+    // Code-only call: force the tool (no thinking, which is incompatible with
+    // forced tool_choice), generous max_tokens, streamed to dodge timeouts.
+    const stream = client.messages.stream({
+      model: MODEL,
+      max_tokens: 32000,
+      output_config: { effort: "high" },
+      system: [{ type: "text", text: CODE_SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
+      tools: [EMIT_CODE_TOOL],
+      tool_choice: { type: "tool", name: "emit_code" },
+      messages,
+    });
+    const final = await stream.finalMessage();
+    const toolUse = final.content.find((b) => b.type === "tool_use" && b.name === "emit_code");
+    if (!toolUse) {
+      return sendJSON(res, 502, { error: "no_code", message: "The model did not return code. Try again." });
+    }
+    return sendJSON(res, 200, { ...normalizeCode(toolUse.input), model: final.model, usage: final.usage });
+  } catch (err) {
+    const status = err?.status && Number.isInteger(err.status) ? err.status : 500;
+    console.error("[/api/code]", err?.message || err);
+    return sendJSON(res, status, { error: "llm_error", message: err?.message || "Code generation failed." });
+  }
+}
+
 async function serveStatic(req, res) {
   let urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
   if (urlPath === "/") urlPath = "/index.html";
@@ -212,6 +267,10 @@ const server = createServer(async (req, res) => {
     if (path === "/api/design") {
       if (req.method !== "POST") return sendJSON(res, 405, { error: "method_not_allowed" });
       return await handleDesign(req, res);
+    }
+    if (path === "/api/code") {
+      if (req.method !== "POST") return sendJSON(res, 405, { error: "method_not_allowed" });
+      return await handleCode(req, res);
     }
     return await serveStatic(req, res);
   } catch (err) {

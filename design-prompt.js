@@ -208,3 +208,66 @@ export function normalizeSpec(input) {
 
   return { reply, spec };
 }
+
+/* =====================================================================
+   CODE BUILD-OUT  — turn a finished design into a runnable starter codebase.
+   Separate, on-demand call (keeps the design call lean and avoids truncation).
+   ===================================================================== */
+
+export const CODE_SYSTEM_PROMPT = `You are ArchitectAI's build-out engineer. Given a completed architecture spec (the same spec the diagram/doc were rendered from), you generate a RUNNABLE starter codebase by calling the \`emit_code\` tool exactly once.
+
+This is a real head-start a team could clone and run — not pseudocode and not a toy. Match the technologies named in each component's \`sub\` field and the overall shape of the design. Default to a pragmatic, modern stack (e.g. TypeScript/Node or Python for services) unless the spec implies otherwise.
+
+Produce a coherent set of 6-12 files that fit together, typically including:
+- the main application service entrypoint (wired to the gateway/API in the design),
+- 1-3 API route/handler files implementing representative endpoints from the design,
+- a data model / schema / migration for the primary datastore,
+- an API definition (OpenAPI/JSON schema) if the design exposes an API,
+- a Dockerfile and a docker-compose.yml (or equivalent) to run it locally,
+- a concise README.md with setup/run steps.
+
+Rules:
+- Every file must be real, internally consistent, and runnable together. Wire components to each other (e.g. the service connects to the Postgres/Redis named in the spec via env vars).
+- Keep each file focused and reasonably concise — enough to bootstrap, not an entire product.
+- Use environment variables for connections/secrets; never hardcode credentials.
+- Prefer widely-used, current libraries.
+
+Also write a short markdown \`reply\` summarising what you generated and how to run it. Always call \`emit_code\` exactly once.`;
+
+export const EMIT_CODE_TOOL = {
+  name: "emit_code",
+  description: "Emit a runnable starter codebase for the given architecture design.",
+  input_schema: {
+    type: "object",
+    properties: {
+      reply: { type: "string", description: "Short markdown summary of what was generated and how to run it." },
+      run: { type: "string", description: "One or two lines: the exact commands to run it locally." },
+      files: {
+        type: "array",
+        description: "The generated files, in a sensible order (entrypoint first, README last).",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            path: { type: "string", description: "repo-relative path, e.g. src/index.ts" },
+            language: { type: "string", description: "language id for syntax context, e.g. typescript, python, yaml, dockerfile, markdown" },
+            content: { type: "string", description: "full file contents" },
+          },
+          required: ["path", "content"],
+        },
+      },
+    },
+    required: ["reply", "files"],
+  },
+};
+
+export function normalizeCode(input) {
+  const files = (Array.isArray(input.files) ? input.files : [])
+    .filter((f) => f && typeof f.path === "string" && typeof f.content === "string")
+    .map((f) => ({ path: f.path, language: f.language || "", content: f.content }));
+  return {
+    reply: typeof input.reply === "string" ? input.reply : "Generated the application code.",
+    run: typeof input.run === "string" ? input.run : "",
+    files,
+  };
+}
